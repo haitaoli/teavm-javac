@@ -33,9 +33,7 @@
   <modules>
     <module>javac</module>
     <module>classlib</module>
-    <module>protocol</module>
     <module>compiler</module>
-    <module>ui</module>
   </modules>
 
   <repositories>

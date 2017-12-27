@@ -32,7 +32,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Properties;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -48,20 +47,10 @@ import org.teavm.backend.javascript.JavaScriptTarget;
 import org.teavm.classlib.impl.JCLPlugin;
 import org.teavm.diagnostics.Problem;
 import org.teavm.diagnostics.ProblemSeverity;
-import org.teavm.javac.protocol.CompilableObject;
-import org.teavm.javac.protocol.CompilationResultMessage;
-import org.teavm.javac.protocol.CompileMessage;
-import org.teavm.javac.protocol.CompilerDiagnosticMessage;
-import org.teavm.javac.protocol.ErrorMessage;
-import org.teavm.javac.protocol.LoadStdlibMessage;
-import org.teavm.javac.protocol.TeaVMDiagnosticMessage;
-import org.teavm.javac.protocol.TeaVMPhaseMessage;
-import org.teavm.javac.protocol.WorkerMessage;
 import org.teavm.jso.JSBody;
+import org.teavm.jso.JSFunctor;
 import org.teavm.jso.JSObject;
 import org.teavm.jso.ajax.XMLHttpRequest;
-import org.teavm.jso.browser.Window;
-import org.teavm.jso.dom.events.MessageEvent;
 import org.teavm.jso.impl.JSOPlugin;
 import org.teavm.jso.typedarrays.ArrayBuffer;
 import org.teavm.jso.typedarrays.Int8Array;
@@ -77,6 +66,11 @@ import org.teavm.vm.TeaVMPhase;
 import org.teavm.vm.TeaVMProgressFeedback;
 import org.teavm.vm.TeaVMProgressListener;
 
+@JSFunctor
+interface Transpiler extends JSObject {
+    String convert(String code) throws IOException;
+}
+
 public final class Client {
     private static boolean isBusy;
     private static final String SOURCE_FILE_NAME = "Main.java";
@@ -86,98 +80,41 @@ public final class Client {
     }
 
     public static void main(String[] args) {
-        Window.worker().addEventListener("message", (MessageEvent event) -> {
-            handleEvent(event);
+        init(success -> {
+            if (success) {
+                registerTranspiler(Client::compileAll);
+            }
+            isBusy = false;
         });
+
     }
 
-    private static void handleEvent(MessageEvent event) {
-        WorkerMessage request = (WorkerMessage) event.getData();
-        try {
-            processResponse(request);
-        } catch (Throwable e) {
-            log("Error occurred");
-            e.printStackTrace();
-            Window.worker().postMessage(createErrorResponse(request, "Error occurred processing message: "
-                    + e.getMessage()));
-        }
-    }
+    @JSBody(params = { "handler" }, script = "window.runJavaCode = handler;")
+    static native void registerTranspiler(Transpiler transpiler);
 
     private static long initializationStartTime;
 
-    private static void processResponse(WorkerMessage request) throws Exception {
-        log("Message received: " + request.getId());
+    private static String compileAll(String code) throws IOException {
+        createSourceFile(code);
 
-        if (isBusy) {
-            log("Responded busy status");
-            Window.worker().postMessage(createErrorResponse(request, "Busy"));
-            return;
-        }
-
-        isBusy = true;
-        switch (request.getCommand()) {
-            case "load-classlib":
-                init(request, ((LoadStdlibMessage) request).getUrl(), success -> {
-                    if (success) {
-                        respondOk(request);
-                    }
-                    isBusy = false;
-                });
-                break;
-            case "compile":
-                compileAll((CompileMessage) request);
-                log("Done processing message: " + request.getId());
-                isBusy = false;
-                break;
-        }
-    }
-
-    private static void compileAll(CompileMessage request) throws IOException {
-        createSourceFile(request.getText());
-
-        CompilationResultMessage response = createMessage();
-        response.setId(request.getId());
-        response.setCommand("compilation-complete");
-
-        if (doCompile(request) && detectMainClass(request) && generateJavaScript(request)) {
-            response.setStatus("successful");
-            response.setScript(readResultingFile());
+        if (doCompile() && detectMainClass() && generateJavaScript()) {
+            return readResultingFile();
         } else {
-            response.setStatus("errors");
+            return null;
         }
-
-        Window.worker().postMessage(response);
     }
 
-    private static void respondOk(WorkerMessage message) {
-        WorkerMessage response = createMessage();
-        response.setCommand("ok");
-        response.setId(message.getId());
-        Window.worker().postMessage(response);
-    }
-
-    private static <T extends ErrorMessage> T createErrorResponse(WorkerMessage request, String text) {
-        T message = createMessage();
-        message.setId(request.getId());
-        message.setCommand("error");
-        message.setText(text);
-        return message;
-    }
-
-    @JSBody(script = "return {};")
-    static native <T extends JSObject> T createMessage();
-
-    private static void init(WorkerMessage request, String url, Consumer<Boolean> next) {
+    private static void init(Consumer<Boolean> next) {
         log("Initializing");
 
         initializationStartTime = System.currentTimeMillis();
-        loadTeaVMClasslib(request, url, success -> {
+        loadTeaVMClasslib(success -> {
             if (success) {
                 try {
                     createStdlib();
                 } catch (IOException e) {
-                    Window.worker().postMessage(createErrorResponse(request, "Error creating stdlib: "
-                            + e.getMessage()));
+                    // Window.worker().postMessage(
+                    // createErrorResponse(request, "Error creating stdlib: " + e.getMessage()));
                     log("Error initializing stdlib: " + e.getMessage());
                     success = false;
                 }
@@ -191,7 +128,7 @@ public final class Client {
         });
     }
 
-    private static boolean doCompile(WorkerMessage request) throws IOException {
+    private static boolean doCompile() throws IOException {
         JavaCompiler compiler = JavacTool.create();
         StandardJavaFileManager fileManager = compiler.getStandardFileManager(null, null, null);
         Iterable<? extends JavaFileObject> compilationUnits = fileManager.getJavaFileObjectsFromFiles(
@@ -203,7 +140,7 @@ public final class Client {
             removeDirectory(outDir);
         }
         new File("/out").mkdirs();
-        JavaCompiler.CompilationTask task = compiler.getTask(out, fileManager, createDiagnosticListener(request),
+        JavaCompiler.CompilationTask task = compiler.getTask(out, fileManager, createDiagnosticListener(),
                 Arrays.asList("-verbose", "-d", "/out", "-Xlint:all"), null, compilationUnits);
         boolean result = task.call();
         out.flush();
@@ -211,8 +148,9 @@ public final class Client {
         return result;
     }
 
-    private static DiagnosticListener<? super JavaFileObject> createDiagnosticListener(WorkerMessage request) {
+    private static DiagnosticListener<? super JavaFileObject> createDiagnosticListener() {
         return diagnostic -> {
+            /* TODO
             CompilerDiagnosticMessage response = createMessage();
             response.setCommand("compiler-diagnostic");
             response.setId(request.getId());
@@ -235,6 +173,7 @@ public final class Client {
             response.setMessage(diagnostic.getMessage(Locale.getDefault()));
 
             Window.worker().postMessage(response);
+            */
         };
     }
 
@@ -250,11 +189,12 @@ public final class Client {
         stdlibClassSource = new DirectoryClasspathClassHolderSource(new File("/teavm-stdlib"), stdlibMapping);
     }
 
-    private static boolean detectMainClass(WorkerMessage request) throws IOException {
+    private static boolean detectMainClass() throws IOException {
         Set<String> candidates = new HashSet<>();
         detectMainClass(new File("/out"), candidates);
         if (candidates.size() != 1) {
             String text = candidates.isEmpty() ? "Main method not found" : "Multiple main methods found";
+            /* TODO:
             TeaVMDiagnosticMessage message = createMessage();
             message.setId(request.getId());
             message.setCommand("diagnostic");
@@ -262,6 +202,7 @@ public final class Client {
             message.setText(text);
             message.setFileName(null);
             Window.worker().postMessage(message);
+            */
             return false;
         }
 
@@ -270,7 +211,7 @@ public final class Client {
         return true;
     }
 
-    private static boolean generateJavaScript(WorkerMessage request) {
+    private static boolean generateJavaScript() {
         try {
             long start = System.currentTimeMillis();
 
@@ -304,7 +245,7 @@ public final class Client {
                 @Override
                 public TeaVMProgressFeedback phaseStarted(TeaVMPhase phase, int count) {
                     if (phase != lastPhase) {
-                        reportPhase(request, phase);
+                        //TODO: reportPhase(request, phase);
                         long newPhaseTime = System.currentTimeMillis();
                         if (lastPhase != null) {
                             log(lastPhase.name() + ": " + (newPhaseTime - lastPhaseTime) + " ms");
@@ -332,7 +273,7 @@ public final class Client {
                     hasSevere = true;
                 }
             }
-            TeaVMProblemRenderer.describeProblems(request, SOURCE_FILE_NAME, teavm);
+            TeaVMProblemRenderer.describeProblems(SOURCE_FILE_NAME, teavm);
 
             long end = System.currentTimeMillis();
             log("TeaVM complete in " + (end - start) + " ms");
@@ -344,27 +285,29 @@ public final class Client {
         }
     }
 
-    private static void reportPhase(WorkerMessage request, TeaVMPhase phase) {
+    private static void reportPhase(TeaVMPhase phase) {
+        /* TODO
         TeaVMPhaseMessage phaseMessage = createMessage();
         phaseMessage.setId(request.getId());
         phaseMessage.setCommand("phase");
         phaseMessage.setPhase(phase.name());
         Window.worker().postMessage(phaseMessage);
+        */
     }
 
-    private static void loadTeaVMClasslib(WorkerMessage request, String url, Consumer<Boolean> next) {
+    private static void loadTeaVMClasslib(Consumer<Boolean> next) {
         File baseDir = new File("/teavm-stdlib");
         baseDir.mkdirs();
 
-        downloadFile(url, data -> {
+        downloadFile("classlib.zip", data -> {
             boolean success;
             try (ZipInputStream input = new ZipInputStream(new ByteArrayInputStream(data))) {
                 unzip(input, baseDir);
                 success = true;
             } catch (IOException e) {
                 success = false;
-                Window.worker().postMessage(createErrorResponse(request, "Error occurred downloading classlib: "
-                        + e.getMessage()));
+                // TODO: Window.worker().postMessage(
+                // createErrorResponse(request, "Error occurred downloading classlib: " + e.getMessage()));
             }
             next.accept(success);
         });

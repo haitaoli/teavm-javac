@@ -36,12 +36,6 @@
 
     <dependency>
       <groupId>org.teavm.javac</groupId>
-      <artifactId>teavm-javac-protocol</artifactId>
-      <version>${project.version}</version>
-    </dependency>
-
-    <dependency>
-      <groupId>org.teavm.javac</groupId>
       <artifactId>teavm-javac-classlib</artifactId>
       <version>${project.version}</version>
       <scope>provided</scope>
