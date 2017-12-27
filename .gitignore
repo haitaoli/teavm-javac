@@ -4,6 +4,7 @@
 !/.idea/codeStyles
 !/.idea/checkstyle-idea.xml
 !/.idea/runConfigurations
-target
+target/
 node_modules
 *.iml
+
